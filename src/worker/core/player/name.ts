@@ -1,0 +1,381 @@
+import { isSport } from "../../../common/index.ts";
+import type { Race } from "../../../common/types.ts";
+import { loadNames, local, random } from "../../util/index.ts";
+import highSchools from "../../data/defaultHighSchools.ts";
+
+// Convert all-caps or mixed case to proper title case
+const toTitleCase = (str: string): string => {
+	// Words that should stay lowercase (unless first word)
+	const smallWords = new Set([
+		"a",
+		"an",
+		"and",
+		"as",
+		"at",
+		"but",
+		"by",
+		"for",
+		"from",
+		"in",
+		"of",
+		"on",
+		"or",
+		"the",
+		"to",
+		"with",
+	]);
+
+	// Roman numerals pattern
+	const romanNumeralPattern = /^(i|ii|iii|iv|v|vi|vii|viii|ix|x)$/i;
+
+	return str
+		.toLowerCase()
+		.split(" ")
+		.map((word, index) => {
+			// Always capitalize first word
+			if (index === 0) {
+				return word.charAt(0).toUpperCase() + word.slice(1);
+			}
+
+			// Keep Roman numerals in uppercase
+			if (romanNumeralPattern.test(word)) {
+				return word.toUpperCase();
+			}
+
+			// Keep small words lowercase unless they're first
+			if (smallWords.has(word)) {
+				return word;
+			}
+
+			// Capitalize other words
+			return word.charAt(0).toUpperCase() + word.slice(1);
+		})
+		.join(" ");
+};
+
+// Map full state names to 2-letter abbreviations
+const stateAbbreviations: Record<string, string> = {
+	Alabama: "AL",
+	Alaska: "AK",
+	Arizona: "AZ",
+	Arkansas: "AR",
+	California: "CA",
+	Colorado: "CO",
+	Connecticut: "CT",
+	Delaware: "DE",
+	"District of Columbia": "DC",
+	Florida: "FL",
+	Georgia: "GA",
+	Hawaii: "HI",
+	Idaho: "ID",
+	Illinois: "IL",
+	Indiana: "IN",
+	Iowa: "IA",
+	Kansas: "KS",
+	Kentucky: "KY",
+	Louisiana: "LA",
+	Maine: "ME",
+	Maryland: "MD",
+	Massachusetts: "MA",
+	Michigan: "MI",
+	Minnesota: "MN",
+	Mississippi: "MS",
+	Missouri: "MO",
+	Montana: "MT",
+	Nebraska: "NE",
+	Nevada: "NV",
+	"New Hampshire": "NH",
+	"New Jersey": "NJ",
+	"New Mexico": "NM",
+	"New York": "NY",
+	"North Carolina": "NC",
+	"North Dakota": "ND",
+	Ohio: "OH",
+	Oklahoma: "OK",
+	Oregon: "OR",
+	Pennsylvania: "PA",
+	"Rhode Island": "RI",
+	"South Carolina": "SC",
+	"South Dakota": "SD",
+	Tennessee: "TN",
+	Texas: "TX",
+	Utah: "UT",
+	Vermont: "VT",
+	Virginia: "VA",
+	Washington: "WA",
+	"West Virginia": "WV",
+	Wisconsin: "WI",
+	Wyoming: "WY",
+};
+
+const getFromCumSumArray = <T extends string>(array: [T, number][]) => {
+	const rand = random.uniform(0, array.at(-1)![1]);
+	const foundRow = array.find((row) => row[1] >= rand);
+
+	if (foundRow === undefined) {
+		throw new Error(`Undefined foundRow (rand=${rand}`);
+	}
+
+	return foundRow[0];
+};
+
+// https://slapshot.blogs.nytimes.com/2011/02/20/hockeys-heartland-state-by-state/ for hockey, 2020 census populations for other sports
+const usaStateFrequencies = isSport("hockey")
+	? {
+			Alabama: 1114,
+			Alaska: 8477,
+			Arizona: 3339,
+			Arkansas: 216,
+			California: 20404,
+			Colorado: 13437,
+			Connecticut: 12088,
+			Delaware: 1049,
+			"District of Columbia": 742,
+			Florida: 10856,
+			Georgia: 2142,
+			Hawaii: 11,
+			Idaho: 2958,
+			Illinois: 24018,
+			Indiana: 4927,
+			Iowa: 2549,
+			Kansas: 1574,
+			Kentucky: 1619,
+			Louisiana: 466,
+			Maine: 6180,
+			Maryland: 7326,
+			Massachusetts: 43445,
+			Michigan: 51404,
+			Minnesota: 53450,
+			Mississippi: 259,
+			Missouri: 6295,
+			Montana: 3568,
+			Nebraska: 1459,
+			Nevada: 940,
+			"New Hampshire": 6120,
+			"New Jersey": 16041,
+			"New Mexico": 1207,
+			"New York": 46389,
+			"North Carolina": 5598,
+			"North Dakota": 4547,
+			Ohio: 13579,
+			Oklahoma: 1051,
+			Oregon: 804,
+			Pennsylvania: 27549,
+			"Rhode Island": 4641,
+			"South Carolina": 1407,
+			"South Dakota": 2151,
+			Tennessee: 2430,
+			Texas: 10909,
+			Utah: 3981,
+			Vermont: 4443,
+			Virginia: 7251,
+			Washington: 7615,
+			"West Virginia": 1060,
+			Wisconsin: 17697,
+			Wyoming: 1810,
+		}
+	: {
+			Alabama: 4779736,
+			Alaska: 710231,
+			Arizona: 6392017,
+			Arkansas: 2915918,
+			California: 37254523,
+			Colorado: 5029196,
+			Connecticut: 3574097,
+			Delaware: 897934,
+			"District of Columbia": 601723,
+			Florida: 18801310,
+			Georgia: 9687653,
+			Hawaii: 1360301,
+			Idaho: 1567582,
+			Illinois: 12830632,
+			Indiana: 6483802,
+			Iowa: 3046355,
+			Kansas: 2853118,
+			Kentucky: 4339367,
+			Louisiana: 4533372,
+			Maine: 1328361,
+			Maryland: 5773552,
+			Massachusetts: 6547629,
+			Michigan: 9883640,
+			Minnesota: 5303925,
+			Mississippi: 2967297,
+			Missouri: 5988927,
+			Montana: 989415,
+			Nebraska: 1826341,
+			Nevada: 2700551,
+			"New Hampshire": 1316470,
+			"New Jersey": 8791894,
+			"New Mexico": 2059179,
+			"New York": 19378102,
+			"North Carolina": 9535483,
+			"North Dakota": 672591,
+			Ohio: 11536504,
+			Oklahoma: 3751351,
+			Oregon: 3831074,
+			Pennsylvania: 12702379,
+			"Rhode Island": 1052567,
+			"South Carolina": 4625364,
+			"South Dakota": 814180,
+			Tennessee: 6346105,
+			Texas: 25145561,
+			Utah: 2763885,
+			Vermont: 625741,
+			Virginia: 8001024,
+			Washington: 6724540,
+			"West Virginia": 1852994,
+			Wisconsin: 5686986,
+			Wyoming: 563626,
+		};
+
+// 2016 census populations
+const canadaProvinceFrequencies = {
+	Alberta: 4067175,
+	"British Columbia": 4648055,
+	Manitoba: 1278365,
+	"New Brunswick": 747101,
+	"Newfoundland and Labrador": 519716,
+	"Northwest Territories": 41786,
+	"Nova Scotia": 923598,
+	Nunavut: 35944,
+	Ontario: 13448494,
+	"Prince Edward Island": 142907,
+	Quebec: 8164361,
+	Saskatchewan: 1098352,
+	Yukon: 35874,
+};
+
+export const withState = (country: string) => {
+	let state;
+	if (country === "USA") {
+		state = random.choice(
+			Object.keys(usaStateFrequencies),
+			Object.values(usaStateFrequencies),
+		);
+	} else if (country === "Canada") {
+		state = random.choice(
+			Object.keys(canadaProvinceFrequencies),
+			Object.values(canadaProvinceFrequencies),
+		);
+	}
+
+	if (state) {
+		return `${state}, ${country}`;
+	}
+
+	return country;
+};
+
+const name = async (
+	countryOverride?: string,
+): Promise<{
+	college: string;
+	highSchool: string;
+	country: string;
+	firstName: string;
+	lastName: string;
+	race: Race;
+}> => {
+	// This makes it wait until g is loaded before calling loadNames, so user-defined playerBioInfo will be used if provided
+	const playerBioInfo = local.playerBioInfo ?? (await loadNames());
+
+	if (local.playerBioInfo === undefined) {
+		local.playerBioInfo = playerBioInfo;
+	}
+
+	const frequencies = playerBioInfo.frequencies;
+	if (!frequencies || frequencies.length === 0) {
+		throw new Error("No countries in playerBioInfo");
+	}
+
+	let country;
+	if (countryOverride && playerBioInfo.countries[countryOverride]) {
+		country = countryOverride;
+	} else {
+		country = getFromCumSumArray(frequencies);
+	}
+
+	if (country === "Equador" && !playerBioInfo.countries[country]) {
+		country = "Ecuador";
+	}
+
+	if (!playerBioInfo.countries[country]) {
+		throw new Error(`Country "${country}" missing in playerBioInfo countries`);
+	}
+
+	const infoCountry = playerBioInfo.countries[country]!;
+
+	const firstCountry = infoCountry.first;
+	if (!firstCountry || firstCountry.length === 0) {
+		throw new Error(`No first names found for ${country}`);
+	}
+	const firstName = getFromCumSumArray(firstCountry);
+
+	const lastCountry = infoCountry.last;
+	if (!lastCountry || lastCountry.length === 0) {
+		throw new Error(`No last names found for ${country}`);
+	}
+	const lastName = getFromCumSumArray(lastCountry);
+
+	let college = "";
+	const colleges = infoCountry.colleges ?? playerBioInfo.default.colleges;
+	if (colleges && colleges.length > 0) {
+		const fractionSkipCollege =
+			infoCountry.fractionSkipCollege ??
+			playerBioInfo.default.fractionSkipCollege;
+
+		if (Math.random() > fractionSkipCollege) {
+			college = getFromCumSumArray(colleges);
+		}
+	}
+
+	const races = infoCountry.races ?? playerBioInfo.default.races;
+	const race = getFromCumSumArray(races);
+
+	// Determine state for USA players
+	let state;
+	if (country === "USA") {
+		state = random.choice(
+			Object.keys(usaStateFrequencies),
+			Object.values(usaStateFrequencies),
+		);
+	} else if (country === "Canada") {
+		state = random.choice(
+			Object.keys(canadaProvinceFrequencies),
+			Object.values(canadaProvinceFrequencies),
+		);
+	}
+
+	// Select a random US high school from the SAME STATE as player's birthplace
+	let highSchool = "";
+	if (country === "USA" && state && highSchools.length > 0) {
+		// Convert full state name to abbreviation for filtering
+		const stateAbbr = stateAbbreviations[state];
+		if (stateAbbr) {
+			// Filter to only high schools in this state
+			const stateHighSchools = highSchools.filter(
+				(hs) => hs.state === stateAbbr,
+			);
+			if (stateHighSchools.length > 0) {
+				const randomHS =
+					stateHighSchools[Math.floor(Math.random() * stateHighSchools.length)];
+				if (randomHS) {
+					highSchool = `${toTitleCase(randomHS.name)} (${randomHS.state})`;
+				}
+			}
+		}
+	}
+
+	const countryWithState = state ? `${state}, ${country}` : country;
+
+	return {
+		college,
+		highSchool,
+		country: countryWithState,
+		firstName,
+		lastName,
+		race,
+	};
+};
+
+export default name;

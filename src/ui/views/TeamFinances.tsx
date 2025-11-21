@@ -1,0 +1,1289 @@
+import {
+	type ChangeEvent,
+	type FormEvent,
+	Fragment,
+	useEffect,
+	useState,
+	type ReactNode,
+} from "react";
+import {
+	BarGraph,
+	DataTable,
+	HelpPopover,
+	MoreLinks,
+} from "../components/index.tsx";
+import useTitleBar from "../hooks/useTitleBar.tsx";
+import {
+	getCols,
+	gradientStyleFactory,
+	helpers,
+	logEvent,
+	toWorker,
+	useLocalPartial,
+} from "../util/index.ts";
+import type { View } from "../../common/types.ts";
+import { getAdjustedTicketPrice, PHASE } from "../../common/index.ts";
+import { wrappedPlayerNameLabels } from "../components/PlayerNameLabels.tsx";
+import type { DataTableRow } from "../components/DataTable/index.tsx";
+import {
+	DEFAULT_LEVEL,
+	MAX_LEVEL,
+	coachingEffect,
+	facilitiesEffectAttendance,
+	facilitiesEffectMood,
+	healthEffect,
+	levelToAmount,
+	levelToEffect,
+	scoutingEffectCutoff,
+	scoutingEffectStddev,
+} from "../../common/budgetLevels.ts";
+import { CurrencyInputGroup } from "../components/CurrencyInputGroup.tsx";
+import { useBlocker } from "../hooks/useBlocker.ts";
+
+const paddingLeft85 = { paddingLeft: 85 };
+
+const formatTicketPrice = (ticketPrice: number) => {
+	// Never show just one decimal place, because it's cents
+	if (!Number.isInteger(ticketPrice) && Number.isInteger(ticketPrice * 10)) {
+		return ticketPrice.toFixed(2);
+	}
+	return String(ticketPrice);
+};
+
+type BudgetKey = "scouting" | "coaching" | "health" | "facilities";
+
+const roundEffect = (effect: number, includePlusSign: boolean) => {
+	return `${includePlusSign && effect >= 0 ? "+" : ""}${effect.toLocaleString(
+		"en-US",
+		{
+			maximumFractionDigits: 2,
+			minimumFractionDigits: 0,
+		},
+	)}`;
+};
+
+const GradientStyle = ({
+	children,
+	level,
+}: {
+	children: ReactNode;
+	level: number;
+}) => {
+	const gradientStyle = gradientStyleFactory(-0.9, -0.05, 0.05, 0.9);
+
+	return <span style={gradientStyle(levelToEffect(level))}>{children}</span>;
+};
+
+const BudgetEffect = ({ type, level }: { type: BudgetKey; level: number }) => {
+	if (type === "scouting") {
+		const effectCutoff = scoutingEffectCutoff(level);
+		const effectStddev = scoutingEffectStddev(level);
+		return (
+			<>
+				Ratings error stddev:{" "}
+				<GradientStyle level={level}>
+					{roundEffect(effectStddev, false)}
+				</GradientStyle>
+				<br />
+				Maximum ratings error:{" "}
+				<GradientStyle level={level}>{effectCutoff}</GradientStyle>
+			</>
+		);
+	}
+
+	if (type === "coaching") {
+		const effect = coachingEffect(level);
+		if (effect === 0) {
+			return "Normal progs";
+		}
+
+		return (
+			<>
+				<GradientStyle level={level}>
+					{roundEffect(100 * effect, true)}%
+				</GradientStyle>{" "}
+				positive progs
+				<br />
+				<GradientStyle level={level}>
+					{roundEffect(-100 * effect, true)}%
+				</GradientStyle>{" "}
+				negative progs
+			</>
+		);
+	}
+
+	if (type === "health") {
+		const effect = healthEffect(level);
+		if (effect === 0) {
+			return "Normal injury duration";
+		}
+
+		return (
+			<>
+				<GradientStyle level={level}>
+					{roundEffect(100 * effect, true)}%
+				</GradientStyle>{" "}
+				injury duration
+			</>
+		);
+	}
+
+	const effectMood = facilitiesEffectMood(level);
+	const effectAttendance = facilitiesEffectAttendance(level);
+	return (
+		<>
+			<GradientStyle level={level}>
+				{roundEffect(effectMood, true)}
+			</GradientStyle>{" "}
+			player mood
+			<br />
+			<GradientStyle level={level}>
+				{roundEffect(100 * effectAttendance, true)}%
+			</GradientStyle>{" "}
+			ticket demand
+		</>
+	);
+};
+
+const FinancesForm = ({
+	autoTicketPrice,
+	challengeNoRatings,
+	gameSimInProgress,
+	godMode,
+	otherTeamTicketPrices,
+	phase,
+	salaryCap,
+	spectator,
+	t,
+	tid,
+	userTid,
+}: Pick<
+	View<"teamFinances">,
+	| "autoTicketPrice"
+	| "challengeNoRatings"
+	| "godMode"
+	| "otherTeamTicketPrices"
+	| "phase"
+	| "salaryCap"
+	| "spectator"
+	| "t"
+	| "tid"
+	| "userTid"
+> & {
+	gameSimInProgress: boolean;
+}) => {
+	const { dirty, setDirty } = useBlocker();
+
+	const [state, setState] = useState({
+		saving: false,
+		coaching: String(t.budget.coaching),
+		facilities: String(t.budget.facilities),
+		health: String(t.budget.health),
+		scouting: String(t.budget.scouting),
+		ticketPrice: formatTicketPrice(t.budget.ticketPrice),
+		adjustForInflation: t.adjustForInflation,
+		autoTicketPrice: t.autoTicketPrice,
+	});
+
+	useEffect(() => {
+		if (!dirty) {
+			setState((state2) => ({
+				...state2,
+				coaching: String(t.budget.coaching),
+				facilities: String(t.budget.facilities),
+				health: String(t.budget.health),
+				scouting: String(t.budget.scouting),
+				ticketPrice: formatTicketPrice(t.budget.ticketPrice),
+				adjustForInflation: t.adjustForInflation,
+				autoTicketPrice: t.autoTicketPrice,
+			}));
+		}
+	}, [dirty, t]);
+
+	const setStateValue = (
+		name: Exclude<keyof typeof state, "saving">,
+		value: any,
+	) => {
+		setState((state2) => ({
+			...state2,
+			[name]: value,
+		}));
+		setDirty(true);
+	};
+
+	const handleChange =
+		(name: Exclude<keyof typeof state, "dirty" | "saving">) =>
+		(event: ChangeEvent<HTMLInputElement>) => {
+			if (name === "adjustForInflation" || name === "autoTicketPrice") {
+				setStateValue(name, event.target.checked);
+			} else {
+				setStateValue(name, event.target.value);
+			}
+		};
+
+	const handleSubmit = async (event: FormEvent) => {
+		event.preventDefault();
+
+		setState((state2) => ({ ...state2, saving: true }));
+
+		const budgetAmounts = {
+			// Convert from [millions of dollars] to [thousands of dollars] rounded to the nearest $10k
+			coaching: helpers.bound(
+				Math.round(helpers.localeParseFloat(state.coaching)),
+				1,
+				MAX_LEVEL,
+			),
+			facilities: helpers.bound(
+				Math.round(helpers.localeParseFloat(state.facilities)),
+				1,
+				MAX_LEVEL,
+			),
+			health: helpers.bound(
+				Math.round(helpers.localeParseFloat(state.health)),
+				1,
+				MAX_LEVEL,
+			),
+			scouting: helpers.bound(
+				Math.round(helpers.localeParseFloat(state.scouting)),
+				1,
+				MAX_LEVEL,
+			),
+
+			// Already in [dollars]
+			ticketPrice: helpers.bound(
+				helpers.localeParseFloat(
+					helpers.localeParseFloat(state.ticketPrice).toFixed(2),
+				),
+				0,
+				Infinity,
+			),
+		};
+
+		await toWorker("main", "updateBudget", {
+			budgetLevels: budgetAmounts,
+			adjustForInflation: state.adjustForInflation || state.autoTicketPrice,
+			autoTicketPrice: state.autoTicketPrice,
+		});
+
+		logEvent({
+			type: "success",
+			text: "Saved team finance settings.",
+			saveToDb: false,
+		});
+
+		setState((state2) => ({
+			...state2,
+			saving: false,
+		}));
+		setDirty(false);
+	};
+
+	const warningMessage =
+		gameSimInProgress && tid === userTid && !spectator ? (
+			<div className="text-danger mb-2">Stop game simulation to edit.</div>
+		) : null;
+
+	const formDisabled = gameSimInProgress || tid !== userTid || spectator;
+
+	const expenseCategories: {
+		key: BudgetKey;
+		title: string;
+	}[] = [
+		{
+			key: "scouting",
+			title: "Scouting",
+		},
+		{
+			key: "coaching",
+			title: "Coaching",
+		},
+		{
+			key: "health",
+			title: "Health",
+		},
+		{
+			key: "facilities",
+			title: "Facilities",
+		},
+	];
+
+	const ticketPriceForRank = state.autoTicketPrice
+		? autoTicketPrice
+		: helpers.localeParseFloat(state.ticketPrice);
+	const ticketPriceRankIndex = otherTeamTicketPrices.findIndex(
+		(price) => price < ticketPriceForRank,
+	);
+	const ticketPriceRank =
+		ticketPriceRankIndex < 0
+			? otherTeamTicketPrices.length + 1
+			: ticketPriceRankIndex + 1;
+
+	const [projectedAttendance, setProjectedAttendance] = useState<
+		number | undefined
+	>();
+	useEffect(() => {
+		let mounted = true;
+		(async () => {
+			const attendance = await toWorker("main", "getProjectedAttendance", {
+				tid,
+				ticketPrice: ticketPriceForRank,
+			});
+
+			if (mounted) {
+				setProjectedAttendance(attendance);
+			}
+		})();
+
+		return () => {
+			mounted = false;
+		};
+	}, [ticketPriceForRank, tid]);
+
+	return (
+		<form onSubmit={handleSubmit} className="mb-3">
+			{warningMessage}
+			<h2>
+				Expense levels{" "}
+				<HelpPopover title="Expense levels">
+					<p>
+						Expense levels can be set between 1 and {MAX_LEVEL}. {DEFAULT_LEVEL}{" "}
+						is neutral, and at the high end there are diminishing returns to
+						increasing the level.
+					</p>
+					<p>Effects are based on your spending over the past 3 seasons.</p>
+				</HelpPopover>
+			</h2>
+			<div className="d-flex flex-column gap-3">
+				{expenseCategories.map((expenseCategory) => {
+					const level = state[expenseCategory.key];
+					const levelInt = helpers.bound(
+						Math.round(helpers.localeParseFloat(state[expenseCategory.key])),
+						1,
+						MAX_LEVEL,
+					);
+					const levelThree = t.expenseLevelsLastThree[expenseCategory.key];
+
+					const formDisabledKey =
+						formDisabled ||
+						(expenseCategory.key === "scouting" && challengeNoRatings);
+
+					return (
+						<div key={expenseCategory.key}>
+							<h3>{expenseCategory.title} expense level</h3>
+							<div className="d-flex">
+								<div>
+									<div
+										className="input-group mb-1"
+										style={{
+											width: 120,
+										}}
+									>
+										<button
+											className="btn btn-secondary"
+											type="button"
+											disabled={
+												formDisabledKey ||
+												Number.isNaN(levelInt) ||
+												levelInt <= 1
+											}
+											onClick={() => {
+												setStateValue(expenseCategory.key, levelInt - 1);
+											}}
+										>
+											−
+										</button>
+										<input
+											type="text"
+											className="form-control text-center"
+											disabled={formDisabledKey}
+											onChange={handleChange(expenseCategory.key)}
+											value={level}
+											inputMode="numeric"
+										/>
+										<button
+											className="btn btn-secondary"
+											type="button"
+											disabled={
+												formDisabledKey ||
+												Number.isNaN(levelInt) ||
+												levelInt >= MAX_LEVEL
+											}
+											onClick={() => {
+												setStateValue(expenseCategory.key, levelInt + 1);
+											}}
+										>
+											+
+										</button>
+									</div>
+									<div>Average of last 3 seasons: {levelThree}</div>
+									<div>
+										Current annual cost:{" "}
+										{Number.isNaN(levelInt)
+											? "???"
+											: helpers.formatCurrency(
+													levelToAmount(levelInt, salaryCap * 1000) / 1000,
+													"M",
+												)}
+									</div>
+								</div>
+								<div className="row ms-3" style={{ width: 350 }}>
+									{expenseCategory.key === "scouting" && godMode ? (
+										<div className="col-12">
+											Scouting does nothing in God Mode because you always see
+											accurate ratings.
+										</div>
+									) : (
+										<>
+											<div className="col-6">
+												<h4>Current effect</h4>
+												<BudgetEffect
+													type={expenseCategory.key}
+													level={levelThree}
+												/>
+											</div>
+											{levelInt !== levelThree ? (
+												<div className="col-6">
+													<h4>
+														After 3 years at level{" "}
+														{Number.isNaN(levelInt) ? "???" : levelInt}
+													</h4>
+													<BudgetEffect
+														type={expenseCategory.key}
+														level={levelInt}
+													/>
+												</div>
+											) : null}
+										</>
+									)}
+								</div>
+							</div>
+						</div>
+					);
+				})}
+			</div>
+			<h2 className="mt-4">
+				Ticket price{" "}
+				<HelpPopover title="Revenue Settings">
+					Set your ticket price too high, and attendance will decrease and some
+					fans will resent you for it. Set it too low, and you're not maximizing
+					your profit.
+				</HelpPopover>
+			</h2>
+			<div className="d-flex align-items-center">
+				<CurrencyInputGroup
+					style={{
+						width: 115,
+					}}
+				>
+					{state.autoTicketPrice ? (
+						<input
+							type="text"
+							className="form-control"
+							disabled
+							value={formatTicketPrice(autoTicketPrice)}
+						/>
+					) : (
+						<input
+							type="text"
+							className="form-control"
+							disabled={formDisabled || state.autoTicketPrice}
+							onChange={handleChange("ticketPrice")}
+							value={state.ticketPrice}
+							inputMode="decimal"
+						/>
+					)}
+				</CurrencyInputGroup>
+				<div className="ms-3">
+					<div>Ticket price rank: #{ticketPriceRank}</div>
+					<div>
+						Projected attendance:{" "}
+						{projectedAttendance !== undefined
+							? helpers.numberWithCommas(projectedAttendance)
+							: ""}
+					</div>
+				</div>
+			</div>
+			{phase === PHASE.PLAYOFFS ? (
+				<div className="mt-1 text-warning">
+					Playoffs price:{" "}
+					{helpers.formatCurrency(
+						getAdjustedTicketPrice(
+							state.autoTicketPrice
+								? autoTicketPrice
+								: helpers.localeParseFloat(state.ticketPrice),
+							true,
+						),
+					)}
+				</div>
+			) : null}
+			<div className="mt-1 d-flex">
+				<div className="form-check">
+					<label className="form-check-label">
+						<input
+							className="form-check-input"
+							onChange={handleChange("autoTicketPrice")}
+							type="checkbox"
+							checked={state.autoTicketPrice}
+							disabled={formDisabled}
+						/>
+						Auto ticket price
+					</label>
+					<HelpPopover title="Auto ticket price" className="ms-1">
+						<p>
+							When enabled, your ticket price will be set to the maximum value
+							possible while still selling out most games.
+						</p>
+						<p>
+							In the playoffs, ticket prices automatically adjust to account for
+							increased demand. That happens regardless of the "auto ticket
+							price" setting.
+						</p>
+					</HelpPopover>
+				</div>
+				<div className="form-check ms-4">
+					<label className="form-check-label">
+						<input
+							className="form-check-input"
+							onChange={handleChange("adjustForInflation")}
+							type="checkbox"
+							checked={state.adjustForInflation || state.autoTicketPrice}
+							disabled={formDisabled || state.autoTicketPrice}
+						/>
+						Auto adjust for inflation
+					</label>
+					<HelpPopover title="Inflation adjustment" className="ms-1">
+						When enabled, your ticket price will automatically change whenever
+						the salary cap changes.
+					</HelpPopover>
+				</div>
+			</div>
+			{tid === userTid && !spectator ? (
+				<div className="mt-4" style={paddingLeft85}>
+					<button
+						className="btn btn-large btn-primary"
+						disabled={formDisabled || state.saving}
+						type="submit"
+					>
+						Save expense levels
+						<br />
+						and ticket price
+					</button>
+				</div>
+			) : null}
+		</form>
+	);
+};
+
+const PayrollInfo = ({
+	luxuryPayroll,
+	luxuryTax,
+	luxuryTaxAmount,
+	minContract,
+	minPayroll,
+	minPayrollAmount,
+	payroll,
+	salaryCap,
+	salaryCapType,
+}: Pick<
+	View<"teamFinances">,
+	| "luxuryPayroll"
+	| "luxuryTax"
+	| "luxuryTaxAmount"
+	| "minContract"
+	| "minPayroll"
+	| "minPayrollAmount"
+	| "payroll"
+	| "salaryCap"
+	| "salaryCapType"
+>) => {
+	const parts = [
+		<>
+			{payroll > minPayroll ? "above" : "below"} the minimum payroll limit (
+			<b>{helpers.formatCurrency(minPayroll, "M")}</b>
+			{minPayrollAmount > 0 ? (
+				<>
+					,{" "}
+					<span className="text-danger">
+						projected penalty: {helpers.formatCurrency(minPayrollAmount, "M")}
+					</span>
+				</>
+			) : null}
+			)
+		</>,
+	];
+
+	if (salaryCapType !== "none") {
+		parts.push(
+			<>
+				{payroll > salaryCap ? "above" : "below"} the salary cap (
+				<b>{helpers.formatCurrency(salaryCap, "M")}</b>)
+			</>,
+		);
+	}
+
+	if (luxuryTax !== 0) {
+		parts.push(
+			<>
+				{payroll > luxuryPayroll ? "above" : "below"} the luxury tax limit (
+				<b>{helpers.formatCurrency(luxuryPayroll, "M")}</b>
+				{luxuryTaxAmount > 0 ? (
+					<>
+						,{" "}
+						<span className="text-danger">
+							projected penalty: {helpers.formatCurrency(luxuryTaxAmount, "M")}
+						</span>
+					</>
+				) : null}
+				)
+			</>,
+		);
+	}
+
+	return (
+		<p>
+			The current payroll (<b>{helpers.formatCurrency(payroll, "M")}</b>) is{" "}
+			{parts.length === 1 ? (
+				parts[0]
+			) : parts.length <= 2 ? (
+				<>
+					{parts[0]} and {parts[1]}
+				</>
+			) : (
+				<>
+					{parts.slice(0, -1).map((part, i) => (
+						<Fragment key={i}>{part}, </Fragment>
+					))}
+					and {parts.at(-1)}
+				</>
+			)}
+			.{" "}
+			{salaryCapType === "hard" ? (
+				<HelpPopover title="Payroll Limits">
+					<p>
+						The salary cap is a hard cap, meaning that you cannot exceed it,
+						even when re-signing your own players or making trades. The only
+						exception is that you can always sign players to minimum contracts (
+						{helpers.formatCurrency(minContract, "M")}/year), so you are never
+						stuck with a team too small to play.
+					</p>
+					<p>
+						Teams with payrolls below the minimum payroll limit will be assessed
+						a fine equal to the difference at the end of the season.
+					</p>
+				</HelpPopover>
+			) : salaryCapType === "soft" ? (
+				<HelpPopover title="Payroll Limits">
+					<p>
+						The salary cap is a soft cap, meaning that you can exceed it to
+						re-sign your own players, to sign free agents to minimum contracts (
+						{helpers.formatCurrency(minContract, "M")}/year), and when making
+						certain trades; however, you cannot exceed the salary cap to sign a
+						free agent for more than the minimum.
+					</p>
+					<p>
+						Teams with payrolls below the minimum payroll limit will be assessed
+						a fine equal to the difference at the end of the season. Teams with
+						payrolls above the luxury tax limit will be assessed a fine equal to{" "}
+						{luxuryTax} times the difference at the end of the season.
+					</p>
+				</HelpPopover>
+			) : (
+				<HelpPopover title="Payroll Limits">
+					<p>
+						There is no salary cap, but the minimum payroll and luxury tax
+						limits still apply.
+					</p>
+					<p>
+						Teams with payrolls below the minimum payroll limit will be assessed
+						a fine equal to the difference at the end of the season. Teams with
+						payrolls above the luxury tax limit will be assessed a fine equal to{" "}
+						{luxuryTax} times the difference at the end of the season.
+					</p>
+				</HelpPopover>
+			)}
+		</p>
+	);
+};
+
+const highlightZeroNegative = (amount: number) => {
+	const formattedValue = helpers.formatCurrency(amount, "M");
+
+	if (amount === 0) {
+		return { classNames: "text-body-secondary", value: formattedValue };
+	}
+	if (amount < 0) {
+		return { classNames: "text-danger", value: formattedValue };
+	}
+
+	return formattedValue;
+};
+
+const TeamFinances = ({
+	abbrev,
+	autoTicketPrice,
+	barData,
+	budget,
+	challengeNoRatings,
+	contractTotals,
+	contracts,
+	godMode,
+	luxuryPayroll,
+	luxuryTax,
+	luxuryTaxAmount,
+	maxStadiumCapacity,
+	minContract,
+	minPayroll,
+	minPayrollAmount,
+	numGames,
+	otherTeamTicketPrices,
+	spectator,
+	payroll,
+	phase,
+	salariesSeasons,
+	salaryCap,
+	salaryCapType,
+	show,
+	t,
+	tid,
+	userTid,
+}: View<"teamFinances">) => {
+	useTitleBar({
+		title: "Team Finances",
+		dropdownView: "team_finances",
+		dropdownFields: { teams: abbrev, shows: show },
+	});
+
+	const { gameSimInProgress } = useLocalPartial(["gameSimInProgress"]);
+
+	const cols = getCols(["Pos", "Name", "Cap%"]).concat(
+		salariesSeasons.map((season) => {
+			return {
+				title: String(season),
+				sortSequence: ["desc", "asc"],
+				sortType: "number",
+			};
+		}),
+	);
+
+	const rows = contracts.map((p, i) => {
+		const data: DataTableRow["data"] = [
+			p.pos,
+			wrappedPlayerNameLabels({
+				injury: p.injury,
+				jerseyNumber: p.jerseyNumber,
+				pid: p.pid,
+				skills: p.skills,
+				style: { fontStyle: p.released ? "italic" : "normal" },
+				defaultWatch: p.watch,
+				firstName: p.firstName,
+				firstNameShort: p.firstNameShort,
+				lastName: p.lastName,
+			}),
+			p.capPct.toFixed(1),
+		];
+
+		// Loop through the salaries for the next five years for this player.
+		for (let j = 0; j < salariesSeasons.length; j++) {
+			if (p.amounts[j]) {
+				const amount = p.amounts[j]!;
+				const formattedAmount = helpers.formatCurrency(amount, "M");
+
+				if (p.released) {
+					data.push({
+						value: <i>{formattedAmount}</i>,
+						sortValue: amount,
+						searchValue: formattedAmount,
+					});
+				} else {
+					data.push({
+						value: formattedAmount,
+						sortValue: amount,
+						searchValue: formattedAmount,
+					});
+				}
+			} else {
+				data.push(null);
+			}
+		}
+
+		return {
+			key: i, // Can't be pid because a player will appear twice if he is cut and re-signed
+			data,
+		};
+	});
+
+	const footer = [
+		{
+			data: ["", "Totals", ""].concat(
+				// @ts-expect-error
+				contractTotals.map((amount) => highlightZeroNegative(amount)),
+			),
+		},
+		{
+			data:
+				salaryCapType === "none"
+					? ["", "Under Luxury Tax", ""].concat(
+							// @ts-expect-error
+							contractTotals.map((amount) =>
+								highlightZeroNegative(luxuryPayroll - amount),
+							),
+						)
+					: ["", "Free Cap Space", ""].concat(
+							// @ts-expect-error
+							contractTotals.map((amount) =>
+								highlightZeroNegative(salaryCap - amount),
+							),
+						),
+		},
+	];
+
+	// This happens for expansion teams before they have a TeamSeason
+	const noSeasonData = barData.length === 0;
+
+	type Row = (typeof barData)[number];
+	const classNameOverride = (row: Row) =>
+		row.champ ? "bar-graph-3" : undefined;
+	const champSuffix = (row: Row) => (row.champ ? ", won championship" : "");
+
+	return (
+		<>
+			<MoreLinks type="team" page="team_finances" abbrev={abbrev} tid={tid} />
+
+			{!budget ? (
+				<>
+					<h2>School Prestige</h2>
+
+					<p>
+						School prestige affects recruiting, player mood, and the overall
+						reputation of your program in college basketball. Prestige changes
+						based on your tournament success and season performance.
+					</p>
+
+					<div className="row">
+						<div className="col-md-6">
+							<table className="table table-striped table-bordered table-sm">
+								<tbody>
+									<tr>
+										<th>Current Prestige</th>
+										<td>
+											<b>{t.prestige ?? t.prestigeBase ?? 70}</b> / 100
+										</td>
+									</tr>
+									<tr>
+										<th>Regular Season Trend</th>
+										<td>
+											{(() => {
+												const recentSeasons = barData.slice(0, 3);
+												if (
+													recentSeasons.length < 3 ||
+													!recentSeasons[0] ||
+													!recentSeasons[1] ||
+													!recentSeasons[2]
+												) {
+													return "Not enough data";
+												}
+
+												// Check if seasons have actual data (not just padding)
+												if (
+													recentSeasons[0].won === 0 &&
+													recentSeasons[1].won === 0 &&
+													recentSeasons[2].won === 0
+												) {
+													return "Not enough data";
+												}
+
+												// Calculate win percentage for each season
+												const winPercentages = recentSeasons.map(row => {
+													const totalGames = row.won + (row.lost ?? 0) + (row.tied ?? 0) + (row.otl ?? 0);
+													return totalGames > 0 ? row.won / totalGames : 0;
+												});
+
+												// Compare most recent to older seasons
+												const current = winPercentages[0];
+												const prev1 = winPercentages[1];
+												const prev2 = winPercentages[2];
+												if (current === undefined || prev1 === undefined || prev2 === undefined) {
+													return "Not enough data";
+												}
+												const avg = (prev1 + prev2) / 2;
+												const diff = current - avg;
+
+												if (Math.abs(diff) < 0.05) {
+													return "Consistent";
+												} else if (diff > 0) {
+													return (
+														<span className="text-success">
+															Improving
+														</span>
+													);
+												} else {
+													return (
+														<span className="text-danger">
+															Declining
+														</span>
+													);
+												}
+											})()}
+										</td>
+									</tr>
+									<tr>
+										<th>Postseason Trend</th>
+										<td>
+											{(() => {
+												const recentSeasons = barData.slice(0, 3);
+												if (
+													recentSeasons.length < 3 ||
+													!recentSeasons[0] ||
+													!recentSeasons[1] ||
+													!recentSeasons[2]
+												) {
+													return "Not enough data";
+												}
+
+												const season0 = recentSeasons[0];
+												const season1 = recentSeasons[1];
+												const season2 = recentSeasons[2];
+
+												// Check if seasons have actual data (not just padding)
+												if (
+													season0.won === 0 &&
+													season1.won === 0 &&
+													season2.won === 0
+												) {
+													return "Not enough data";
+												}
+
+												// Calculate average tournament success
+												const current = season0.playoffRoundsWon ?? -1;
+												const prev1 = season1.playoffRoundsWon ?? -1;
+												const prev2 = season2.playoffRoundsWon ?? -1;
+												const avgPast = (prev1 + prev2) / 2;
+
+												if (current === -1 && avgPast <= 0) {
+													return (
+														<span className="text-danger">
+															Not making tournaments
+														</span>
+													);
+												} else if (current > avgPast + 0.5) {
+													return (
+														<span className="text-success">
+															Improving
+														</span>
+													);
+												} else if (current < avgPast - 0.5) {
+													return (
+														<span className="text-danger">
+															Declining
+														</span>
+													);
+												} else {
+													return "Consistent";
+												}
+											})()}
+										</td>
+									</tr>
+									<tr>
+										<th>Overall Trend</th>
+										<td>
+											{(() => {
+												const recentSeasons = barData.slice(0, 3);
+												if (
+													recentSeasons.length < 3 ||
+													!recentSeasons[0] ||
+													!recentSeasons[1] ||
+													!recentSeasons[2]
+												) {
+													return "Not enough data";
+												}
+
+												// Check if seasons have actual data (not just padding)
+												if (
+													recentSeasons[0].won === 0 &&
+													recentSeasons[1].won === 0 &&
+													recentSeasons[2].won === 0
+												) {
+													return "Not enough data";
+												}
+
+												if (
+													!recentSeasons[0].prestige ||
+													!recentSeasons[1].prestige
+												) {
+													return "Not enough data";
+												}
+
+												const currentPrestige = recentSeasons[0].prestige;
+												const previousPrestige = recentSeasons[1].prestige;
+												const change = currentPrestige - previousPrestige;
+												if (Math.abs(change) < 0.5) {
+													return "Stable";
+												} else if (change > 0) {
+													return (
+														<span className="text-success">
+															Rising (+{change.toFixed(1)})
+														</span>
+													);
+												} else {
+													return (
+														<span className="text-danger">
+															Declining ({change.toFixed(1)})
+														</span>
+													);
+												}
+											})()}
+										</td>
+									</tr>
+								</tbody>
+							</table>
+						</div>
+						<div className="col-md-6">
+							<h4>Recent Performance:</h4>
+							<table className="table table-sm">
+								<thead>
+									<tr>
+										<th>Season</th>
+										<th>Result</th>
+										<th>Prestige</th>
+									</tr>
+								</thead>
+								<tbody>
+									{barData.slice(0, 5).map((row) => {
+										const maxRounds = 6; // Typical NCAA tournament rounds
+										let result = "";
+										if (row.champ) {
+											result = "🏆 Champion";
+										} else if (row.playoffRoundsWon >= maxRounds - 1) {
+											result = "Championship Game";
+										} else if (row.playoffRoundsWon >= maxRounds - 2) {
+											result = "Final Four";
+										} else if (row.playoffRoundsWon >= maxRounds - 3) {
+											result = "Sweet 16";
+										} else if (row.playoffRoundsWon > 0) {
+											result = "Made Tournament";
+										} else if (row.playoffRoundsWon === -1) {
+											result = "Missed Tournament";
+										} else {
+											result = "—";
+										}
+
+										return (
+											<tr key={row.season}>
+												<td>{row.season}</td>
+												<td>{result}</td>
+												<td>
+													{row.prestige !== undefined
+														? row.prestige.toFixed(1)
+														: "—"}
+												</td>
+											</tr>
+										);
+									})}
+								</tbody>
+							</table>
+							<p className="small text-muted mb-0">
+								Prestige changes based on tournament success (biggest factor),
+								regular season performance, and conference dominance. Slowly
+								decays back toward historical baseline (5% per year).
+							</p>
+						</div>
+					</div>
+				</>
+			) : null}
+
+			{budget ? (
+				<PayrollInfo
+					luxuryPayroll={luxuryPayroll}
+					luxuryTax={luxuryTax}
+					luxuryTaxAmount={luxuryTaxAmount}
+					minContract={minContract}
+					minPayroll={minPayroll}
+					minPayrollAmount={minPayrollAmount}
+					payroll={payroll}
+					salaryCap={salaryCap}
+					salaryCapType={salaryCapType}
+				/>
+			) : null}
+
+			<div className="row">
+				<div className="col-md-3 col-sm-2">
+					<h3>Wins</h3>
+					<div className="bar-graph-small">
+						<BarGraph
+							data={barData}
+							y={["won"]}
+							tooltip={(row) => `${row.season}: ${row.won}${champSuffix(row)}`}
+							ylim={[0, numGames]}
+							classNameOverride={classNameOverride}
+						/>
+					</div>
+					<br />
+					<br />
+					<h3>
+						Hype{" "}
+						<HelpPopover title="Hype">
+							"Hype" refers to fans' interest in your team. If your team is
+							winning or improving, then hype increases; if your team is losing
+							or stagnating, then hype decreases. Hype influences attendance,
+							various revenue sources such as merchandising, and the attitude
+							players have towards your organization.
+						</HelpPopover>
+					</h3>
+					<div id="bar-graph-hype" className="bar-graph-small">
+						<BarGraph
+							data={barData}
+							y={["hype"]}
+							tooltip={(row) =>
+								`${row.season}: ${row.hype.toFixed(2)}${champSuffix(row)}`
+							}
+							ylim={[0, 1]}
+							classNameOverride={classNameOverride}
+						/>
+					</div>
+					<br />
+					<br />
+					<h3>Average Attendance</h3>
+					<div id="bar-graph-att" className="bar-graph-small">
+						<BarGraph
+							data={barData}
+							y={["att"]}
+							tooltip={(row) =>
+								`${row.season}: ${helpers.numberWithCommas(
+									Math.round(row.att),
+								)}${champSuffix(row)}`
+							}
+							ylim={[0, maxStadiumCapacity]}
+							classNameOverride={classNameOverride}
+						/>
+					</div>
+				</div>
+				{budget && !noSeasonData ? (
+					<div className="col-lg-4 col-md-3 col-sm-3 mb-3">
+						<h3>Revenue</h3>
+						<div id="bar-graph-revenue" className="bar-graph-large">
+							<BarGraph
+								data={barData}
+								y={[
+									"revenuesNationalTv",
+									"revenuesLocalTv",
+									"revenuesTicket",
+									"revenuesSponsor",
+									"revenuesMerch",
+									"revenuesLuxuryTaxShare",
+								]}
+								tooltip={(row, y) => {
+									const text = {
+										revenuesNationalTv: "national TV revenue",
+										revenuesLocalTv: "local TV revenue",
+										revenuesTicket: "ticket revenue",
+										revenuesSponsor: "corporate sponsorship revenue",
+										revenuesMerch: "merchandising revenue",
+										revenuesLuxuryTaxShare: "luxury tax share revenue",
+									};
+
+									return `${row.season} ${text[y]}: ${helpers.formatCurrency(
+										row[y] / 1000,
+										"M",
+										1,
+									)}`;
+								}}
+							/>
+						</div>
+						<br />
+						<br />
+						<h3>Expenses</h3>
+						<div id="bar-graph-expenses" className="bar-graph-large">
+							<BarGraph
+								data={barData}
+								y={[
+									"expensesSalary",
+									"expensesScouting",
+									"expensesCoaching",
+									"expensesHealth",
+									"expensesFacilities",
+									"expensesMinTax",
+									"expensesLuxuryTax",
+								]}
+								tooltip={(row, y) => {
+									const text = {
+										expensesSalary: "player salaries",
+										expensesScouting: "scouting",
+										expensesCoaching: "coaching",
+										expensesHealth: "health",
+										expensesFacilities: "facilities",
+										expensesMinTax: "minimum payroll tax",
+										expensesLuxuryTax: "luxury tax",
+									};
+
+									return `${row.season} ${text[y]}: ${helpers.formatCurrency(
+										row[y] / 1000,
+										"M",
+										1,
+									)}`;
+								}}
+							/>
+						</div>
+						<br />
+						<br />
+						<h3>Cash (cumulative)</h3>
+						<div id="bar-graph-cash" className="bar-graph-medium">
+							<BarGraph
+								data={barData}
+								y={["cash"]}
+								tooltip={(row) =>
+									`${row.season}: ${helpers.formatCurrency(
+										row.cash,
+										"M",
+										1,
+									)}${champSuffix(row)}`
+								}
+								classNameOverride={classNameOverride}
+							/>
+						</div>
+					</div>
+				) : null}
+				{budget ? (
+					<div className="col-lg-5 col-md-6 col-sm-7">
+						<FinancesForm
+							key={tid}
+							autoTicketPrice={autoTicketPrice}
+							challengeNoRatings={challengeNoRatings}
+							gameSimInProgress={gameSimInProgress}
+							godMode={godMode}
+							otherTeamTicketPrices={otherTeamTicketPrices}
+							phase={phase}
+							salaryCap={salaryCap}
+							spectator={spectator}
+							t={t}
+							tid={tid}
+							userTid={userTid}
+						/>
+					</div>
+				) : null}
+			</div>
+
+			{budget ? (
+				<>
+					<h2>Player Salaries</h2>
+
+					<p>
+						You can release players from{" "}
+						<a href={helpers.leagueUrl(["roster"])}>your roster</a>. Released
+						players who are still owed money are <i>shown in italics</i>.
+					</p>
+
+					<DataTable
+						cols={cols}
+						defaultSort={[3, "desc"]}
+						name="TeamFinances"
+						nonfluid
+						footer={footer}
+						rows={rows}
+					/>
+				</>
+			) : null}
+		</>
+	);
+};
+
+export default TeamFinances;

@@ -1,0 +1,54 @@
+/**
+ * This is not actually a test, it's a script to see what the quartiles of ovr ratings look like for different draftAge settings, for use when parametrizing the age adjustment in genRatings.
+ *
+ * Run this like (after unskipping the test):
+ *
+ * $ SPORT=basketball pnpm jest src/worker/core/player/genRatings.test.ts | grep QUARTILES
+ *
+ * It's in jest rather than node.js because jest has all the imports and crap set up.
+ */
+
+import { describe, test } from "vitest";
+import { PLAYER } from "../../../common/index.ts";
+import testHelpers from "../../../test/helpers.ts";
+import { g } from "../../util/index.ts";
+import createRandomPlayers from "../league/create/createRandomPlayers.ts";
+import { DEFAULT_LEVEL } from "../../../common/budgetLevels.ts";
+import { range } from "../../../common/utils.ts";
+
+const printQuartiles = async (age?: number) => {
+	if (age !== undefined) {
+		testHelpers.resetG();
+		g.setWithoutSavingToDB("draftAges", [age, age]);
+	}
+
+	const players = await createRandomPlayers({
+		activeTids: range(30),
+		onlyFreeAgents: false,
+		scoutingLevel: DEFAULT_LEVEL,
+		teams: range(30).map((tid) => ({ tid })),
+	});
+
+	const ovrs = (players as any[])
+		.filter((p) => p.tid >= PLAYER.FREE_AGENT)
+		.map((p) => p.ratings.at(-1).ovr)
+		.sort((a, b) => a - b) as number[];
+	const quartiles = [0.25, 0.5, 0.75].map(
+		(fraction) => ovrs[Math.round(fraction * ovrs.length)],
+	);
+	console.log(
+		"QUARTILES at",
+		age !== undefined ? `age ${String(age).padStart(2)} ` : "default",
+		quartiles,
+	);
+};
+
+describe.skip("worker/core/player/genRatings", () => {
+	test("this is not actually a test, see comment at the top of the file", async () => {
+		await printQuartiles();
+
+		/*for (const age of range(0, 50, 5)) {
+			await printQuartiles(age);
+		}*/
+	});
+});

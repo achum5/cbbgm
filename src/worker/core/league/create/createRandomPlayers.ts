@@ -1,0 +1,443 @@
+import { draft, player, freeAgents } from "../../index.ts";
+import { PHASE, PLAYER, POSITION_COUNTS, isSport } from "../../../../common/index.ts";
+import { groupBy, groupByUnique, orderBy } from "../../../../common/utils.ts";
+import type {
+	PlayerWithoutKey,
+	MinimalPlayerRatings,
+	PlayerContract,
+	Team,
+} from "../../../../common/types.ts";
+import { g, random } from "../../../util/index.ts";
+
+export const getNumPlayersPerTeam = () => {
+	// For college basketball: use maxScholarships (13) if set, otherwise use maxRosterSize - 2
+	const maxScholarships = g.get("maxScholarships");
+	if (maxScholarships && maxScholarships > 0) {
+		return maxScholarships; // 13 for college basketball
+	}
+	// 13 for professional basketball
+	return Math.max(g.get("maxRosterSize") - 2, g.get("minRosterSize"));
+};
+
+const createRandomPlayers = async ({
+	activeTids,
+	onlyFreeAgents,
+	scoutingLevel,
+	teams,
+}: {
+	activeTids: number[];
+	onlyFreeAgents: boolean;
+	scoutingLevel: number;
+	teams: Pick<Team, "tid" | "retiredJerseyNumbers" | "prestigeBase">[];
+}) => {
+	const players: PlayerWithoutKey[] = [];
+
+	// Generate past 20 years of draft classes, unless forceRetireSeasons/forceRetireAge/draftAges make that infeasible
+	let seasonsSimmed = 20;
+	const forceRetireAge = g.get("forceRetireAge");
+	const draftAges = g.get("draftAges");
+	const forceRetireSeasons = g.get("forceRetireSeasons");
+	const averageDraftAge = Math.round((draftAges[0] + draftAges[1]) / 2);
+	const forceRetireAgeDiff = forceRetireAge - averageDraftAge;
+	let forceRetireDiff;
+	if (forceRetireSeasons > 0 && forceRetireAgeDiff > 0) {
+		forceRetireDiff = Math.min(forceRetireSeasons, forceRetireAgeDiff);
+	} else {
+		forceRetireDiff = Math.max(forceRetireSeasons, forceRetireAgeDiff);
+	}
+	if (forceRetireDiff > 0 && forceRetireDiff < seasonsSimmed) {
+		seasonsSimmed = forceRetireDiff;
+	} else {
+		// Maybe add some extra seasons, for leagues when players start young
+		const estimatedRetireAge = forceRetireDiff > 0 ? forceRetireAge : 35;
+		const estimatedRetireAgeDiff = estimatedRetireAge - averageDraftAge;
+		if (estimatedRetireAgeDiff > seasonsSimmed) {
+			seasonsSimmed = estimatedRetireAgeDiff;
+		}
+	}
+
+	const seasonOffset = g.get("phase") >= PHASE.RESIGN_PLAYERS ? -1 : 0;
+	const NUM_PAST_SEASONS = seasonsSimmed + seasonOffset;
+
+	// Keep synced with Dropdown.js seasonsAndOldDrafts and addRelatives
+	let keptPlayers: PlayerWithoutKey<MinimalPlayerRatings>[] = [];
+
+	for (
+		let numYearsAgo = NUM_PAST_SEASONS;
+		numYearsAgo > seasonOffset;
+		numYearsAgo--
+	) {
+		let draftClass = await draft.genPlayersWithoutSaving(
+			g.get("season"),
+			scoutingLevel,
+			[],
+		);
+
+		// value is needed for ordering the historical draft class. This is value AT THE TIME OF THE DRAFT! Will be regenerated below for subsequent use.
+		for (const p of draftClass) {
+			p.value = player.value(p, {
+				ovrMean: 47,
+				ovrStd: 10,
+			});
+		}
+
+		// Very rough simulation of a draft
+		draftClass = orderBy(draftClass, "value", "desc");
+		const tids = [...activeTids];
+		random.shuffle(tids);
+
+		for (const [i, p] of draftClass.entries()) {
+			let round = 0;
+			let pick = 0;
+			const roundTemp = Math.floor(i / activeTids.length) + 1;
+
+			if (roundTemp <= g.get("numDraftRounds")) {
+				round = roundTemp;
+				pick = (i % activeTids.length) + 1;
+			}
+
+			// Save these for later, because player.develop will overwrite them
+
+			const pot = p.ratings[0].pot;
+			const ovr = p.ratings[0].ovr;
+			const skills = p.ratings[0].skills;
+
+			// Develop player and see if he is still non-retired
+
+			await player.develop(p, numYearsAgo, true);
+
+			// Do this before developing, to save ratings
+			p.draft = {
+				round,
+				pick,
+				tid: round === 0 ? -1 : tids[pick - 1]!,
+				year: g.get("season") - numYearsAgo,
+				originalTid: round === 0 ? -1 : tids[pick - 1]!,
+				pot,
+				ovr,
+				skills,
+			};
+
+			if (round === 0) {
+				// Guaranteed contracts for undrafted players are overwritten below
+				p.contract.exp = -Infinity;
+			} else {
+				// Calculate years remaining based on when they were drafted
+				const draftYear = g.get("season") - numYearsAgo;
+				const seasonsSinceDraft = g.get("season") - draftYear;
+				const yearsRemaining = Math.max(1, 4 - seasonsSinceDraft);
+
+
+				// Determine if player has already used their redshirt in the past
+				// Freshmen can't have redshirted yet (just arrived at college)
+				// Upperclassmen have increasing chances, especially if lower rated
+				let hasRedshirted = false;
+				if (yearsRemaining < 4) {
+					let redshirtChance = 0;
+					if (yearsRemaining === 3) {
+						redshirtChance = 0.10; // Sophomores: 10% base
+					} else if (yearsRemaining === 2) {
+						redshirtChance = 0.15; // Juniors: 15% base
+					} else if (yearsRemaining === 1) {
+						redshirtChance = 0.20; // Seniors: 20% base
+					}
+
+					// Lower rated players are more likely to have redshirted
+					const latestRating = p.ratings[p.ratings.length - 1];
+					const ovr = latestRating?.ovr ?? 50;
+					const pot = latestRating?.pot ?? 50;
+					if (ovr < 55) {
+						redshirtChance += 0.15;
+					} else if (ovr < 60) {
+						redshirtChance += 0.10;
+					}
+					if (pot < 55) {
+						redshirtChance += 0.10;
+					} else if (pot < 60) {
+						redshirtChance += 0.05;
+					}
+
+					hasRedshirted = Math.random() < redshirtChance;
+				}
+				const contract: PlayerContract = {
+					amount: 0, // College basketball - no salaries
+					exp: g.get("season") + yearsRemaining,
+					status: "scholarship", // All drafted players start as scholarships
+					yearsRemaining,
+					originalClass: draftYear,
+					isRedshirt: false, // Not redshirting by default
+					hasRedshirted, // May have redshirted in the past (calculated above)
+				};
+				if (g.get("draftPickAutoContract")) {
+					contract.rookie = true;
+				}
+
+				player.setContract(p, contract, false);
+			}
+			p.contract.temp = true;
+
+			keptPlayers.push(p);
+		}
+	}
+
+	// (g.get("maxRosterSize") + 1) for wiggle room (need min contract FAs sometimes)
+	if (keptPlayers.length < (g.get("maxRosterSize") + 1) * activeTids.length) {
+		throw new Error("Not enough players!");
+	}
+
+	const numPlayerPerTeam = getNumPlayersPerTeam();
+	const maxNumFreeAgents = Math.round(
+		(activeTids.length / 3) * g.get("maxRosterSize"),
+	); // 150 for basketball
+
+	// Needed for sorting the keptPlayers array and inside getBest (only if DRAFT_BY_TEAM_OVR)
+	for (const p of keptPlayers) {
+		p.value = player.value(p, {
+			ovrMean: 47,
+			ovrStd: 10,
+		});
+	}
+	keptPlayers.sort((a, b) => b.value - a.value);
+
+	// Keep track of number of players on each team
+	const numPlayersByTid: Record<number, number> = {};
+
+	for (const tid2 of activeTids) {
+		numPlayersByTid[tid2] = 0;
+	}
+
+	const teamJerseyNumbers: Record<number, string[]> = {};
+
+	const teamsByTid = groupByUnique(teams, "tid");
+
+	const addPlayerToTeam = async (p: PlayerWithoutKey, tid2: number) => {
+		if (!teamJerseyNumbers[tid2]) {
+			teamJerseyNumbers[tid2] = [];
+		}
+
+		const t = teamsByTid[tid2];
+		const retiredJerseyNumbers =
+			t?.retiredJerseyNumbers?.map((row) => row.number) ?? [];
+
+		numPlayersByTid[tid2]! += 1;
+		p.tid = tid2;
+		await player.addStatsRow(p, g.get("phase") === PHASE.PLAYOFFS, {
+			retired: retiredJerseyNumbers,
+			team: teamJerseyNumbers[tid2],
+		});
+
+		if (p.jerseyNumber !== undefined) {
+			teamJerseyNumbers[tid2].push(p.jerseyNumber);
+		}
+
+		// Keep rookie contract, or no?
+		if (p.contract.exp >= g.get("season") && g.get("draftPickAutoContract")) {
+			delete p.contract.temp;
+		}
+
+		players.push(p);
+	};
+
+	const probStillOnDraftTeam = (p: PlayerWithoutKey) => {
+		let prob = 0; // Probability a player is still on his draft team
+
+		const numYearsAgo = g.get("season") - p.draft.year;
+
+		if (typeof p.draft.round === "number") {
+			if (numYearsAgo < 8) {
+				prob = (8 - numYearsAgo) / 8; // 87.5% for last year, 75% for 2 years ago, etc
+			} else {
+				prob = 0.125;
+			}
+
+			if (p.draft.round > 1) {
+				prob *= 0.75;
+			}
+
+			if (p.draft.round > 3) {
+				prob *= 0.75;
+			}
+
+			if (p.draft.round > 5) {
+				prob *= 0.75;
+			}
+
+			if (p.draft.round > 7) {
+				prob *= 0.75;
+			}
+		}
+
+		return prob;
+	};
+
+	// Drafted players kept with own team, with some probability
+	const playersStayedOnOwnTeam = new Set();
+	for (let i = 0; i < numPlayerPerTeam * activeTids.length; i++) {
+		const p = keptPlayers[i]!;
+
+		if (
+			p.draft.tid >= 0 &&
+			Math.random() < probStillOnDraftTeam(p) &&
+			numPlayersByTid[p.draft.tid]! < numPlayerPerTeam
+		) {
+			await addPlayerToTeam(p, p.draft.tid);
+			playersStayedOnOwnTeam.add(p);
+		}
+	}
+	keptPlayers = keptPlayers.filter((p) => !playersStayedOnOwnTeam.has(p));
+
+	// Then add other players, up to the limit
+	// For college basketball: correlate roster quality with program prestige
+	// Best programs (high prestigeBase) get best available players
+	let tidsOrder = [...activeTids];
+
+	if (isSport("basketball") && g.get("salaryCapType") === "none") {
+		// College basketball - sort teams by prestige (high to low)
+		// Use the teams parameter which has prestigeBase
+		const teamPrestigeMap = new Map(
+			teams.map((t) => [t.tid, t.prestigeBase ?? 70])
+		);
+
+		tidsOrder.sort((a, b) => {
+			const prestigeA = teamPrestigeMap.get(a) ?? 70;
+			const prestigeB = teamPrestigeMap.get(b) ?? 70;
+			// Sort descending (best programs first)
+			return prestigeB - prestigeA;
+		});
+	} else {
+		// Professional basketball or other sports - random order
+		random.shuffle(tidsOrder);
+	}
+
+	let roundNumber = 0;
+	while (true) {
+		let numTeamsDone = 0;
+		roundNumber += 1;
+
+		// For college: alternate between prestige order and reverse prestige order (like a snake draft)
+		// This prevents the best teams from dominating every position
+		const tids = roundNumber % 2 === 1 ? [...tidsOrder] : [...tidsOrder].reverse();
+
+		for (const currentTid of tids) {
+			if (numPlayersByTid[currentTid]! >= numPlayerPerTeam) {
+				numTeamsDone += 1;
+				continue;
+			}
+
+			const p = freeAgents.getBest(
+				players.filter((p2) => p2.tid === currentTid),
+				keptPlayers,
+			);
+
+			if (p) {
+				keptPlayers = keptPlayers.filter((p2) => p2 !== p);
+				await addPlayerToTeam(p, currentTid);
+			} else {
+				console.log(currentTid, "can't find player");
+				numTeamsDone += 1;
+			}
+		}
+
+		if (numTeamsDone === activeTids.length) {
+			break;
+		}
+	}
+
+	const addToFreeAgents = (
+		p: PlayerWithoutKey<MinimalPlayerRatings> | undefined,
+	) => {
+		// TEMP DISABLE WITH ESLINT 9 UPGRADE eslint-disable-next-line @typescript-eslint/strict-boolean-expressions
+		if (p) {
+			// So half will be eligible to retire after the first season
+			p.yearsFreeAgent = Math.random() > 0.5 ? 1 : 0;
+
+			// Calculate years remaining based on when they were drafted
+			const draftYear = p.draft.year;
+			const seasonsSinceDraft = g.get("season") - draftYear;
+			const yearsRemaining = Math.max(1, 4 - seasonsSinceDraft);
+
+			// Determine if player has already used their redshirt in the past
+			// Freshmen can't have redshirted yet (just arrived at college)
+			// Upperclassmen have increasing chances, especially if lower rated
+			let hasRedshirted = false;
+			if (yearsRemaining < 4) {
+				let redshirtChance = 0;
+				if (yearsRemaining === 3) {
+					redshirtChance = 0.10; // Sophomores: 10% base
+				} else if (yearsRemaining === 2) {
+					redshirtChance = 0.15; // Juniors: 15% base
+				} else if (yearsRemaining === 1) {
+					redshirtChance = 0.20; // Seniors: 20% base
+				}
+
+				// Lower rated players are more likely to have redshirted
+				const latestRating = p.ratings[p.ratings.length - 1];
+				const ovr = latestRating?.ovr ?? 50;
+				const pot = latestRating?.pot ?? 50;
+				if (ovr < 55) {
+					redshirtChance += 0.15;
+				} else if (ovr < 60) {
+					redshirtChance += 0.10;
+				}
+				if (pot < 55) {
+					redshirtChance += 0.10;
+				} else if (pot < 60) {
+					redshirtChance += 0.05;
+				}
+
+				hasRedshirted = Math.random() < redshirtChance;
+			}
+
+			player.setContract(
+				p,
+				{
+					amount: 0, // College basketball - no salaries
+					exp: g.get("season") + yearsRemaining,
+					status: "walk-on", // Free agents are walk-ons
+					yearsRemaining,
+					originalClass: draftYear,
+					isRedshirt: false, // Not redshirting by default
+					hasRedshirted, // May have redshirted in the past (calculated above)
+				},
+				false,
+			);
+			p.contract.temp = true;
+			player.addToFreeAgents(p);
+			players.push(p);
+		}
+	};
+
+	// Finally, free agents
+	if (Object.keys(POSITION_COUNTS).length === 0) {
+		for (let i = 0; i < maxNumFreeAgents; i++) {
+			addToFreeAgents(keptPlayers[i]);
+		}
+	} else {
+		// POSITION_COUNTS exists, so use it to keep a balanced list of free agents
+		let positionCountsSum = 0;
+		for (const positionCount of Object.values(POSITION_COUNTS)) {
+			positionCountsSum += positionCount;
+		}
+
+		const groupedPlayers = groupBy(keptPlayers, (p) => p.ratings[0].pos);
+
+		for (const pos of Object.keys(groupedPlayers)) {
+			const limit = Math.round(
+				(maxNumFreeAgents * POSITION_COUNTS[pos]!) / positionCountsSum,
+			);
+
+			for (let i = 0; i < limit; i++) {
+				addToFreeAgents(groupedPlayers[pos]![i]);
+			}
+		}
+	}
+
+	if (onlyFreeAgents) {
+		// Okay, then why did we create the other players in the first place? Because this ensures the distribution of talnet in the free agent pool is the same as in normal leagues.
+		return players.filter((p) => p.tid === PLAYER.FREE_AGENT);
+	}
+
+	return players;
+};
+
+export default createRandomPlayers;
